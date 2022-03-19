@@ -1,0 +1,1 @@
+./scripts/dist_run_single.sh 1 refcoco/train_end2end.py ./cfgs/refcoco/base_gt_boxes_4x16G.yaml ./
