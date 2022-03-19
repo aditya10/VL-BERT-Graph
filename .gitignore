@@ -2,3 +2,5 @@ data/coco
 __pycache__
 common/lib
 model/pretrained_model
+cache
+output
