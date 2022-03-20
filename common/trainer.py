@@ -130,6 +130,8 @@ def train(net,
 
             optimizer_time = time.time()
             if (global_steps + 1) % gradient_accumulate_steps == 0:
+                optimizer.step()
+
                 # step LR scheduler
                 if lr_scheduler is not None and not isinstance(lr_scheduler,
                                                                torch.optim.lr_scheduler.ReduceLROnPlateau):
@@ -148,7 +150,6 @@ def train(net,
                                           scalar_value=float(total_norm),
                                           global_step=global_steps)
 
-                optimizer.step()
                 # clear the parameter gradients
                 optimizer.zero_grad()
             optimizer_time = time.time() - optimizer_time
