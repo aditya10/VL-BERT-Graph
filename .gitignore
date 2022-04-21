@@ -4,3 +4,6 @@ common/lib
 model/pretrained_model
 cache
 output
+wandb
+results
+cfgs/refcoco/discard

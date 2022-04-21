@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from common.gnn import GNN
 from external.pytorch_pretrained_bert.modeling import BertLayerNorm, BertEncoder, BertPooler, ACT2FN, BertOnlyMLMHead
 
 # todo: add this to config
@@ -48,10 +49,10 @@ class VisualLinguisticBert(BaseModel):
         # visual transform
         self.visual_1x1_text = None
         self.visual_1x1_object = None
-        if config.visual_size != config.hidden_size:
+        if config.visual_size != config.hidden_size: # both are 768, so false
             self.visual_1x1_text = nn.Linear(config.visual_size, config.hidden_size)
             self.visual_1x1_object = nn.Linear(config.visual_size, config.hidden_size)
-        if config.visual_ln:
+        if config.visual_ln: # true
             self.visual_ln_text = BertLayerNorm(config.hidden_size, eps=1e-12)
             self.visual_ln_object = BertLayerNorm(config.hidden_size, eps=1e-12)
         else:
@@ -63,6 +64,21 @@ class VisualLinguisticBert(BaseModel):
             self.register_parameter('visual_scale_object', visual_scale_object)
 
         self.encoder = BertEncoder(config)
+
+        self.gnn_type = config.gnn_type
+        self.use_weighted_gnn = config.use_weighted_gnn
+
+        if config.gnn_edge_mask_layers != '':
+            self.gnn_edge_mask_layers = [int(i) for i in config.gnn_edge_mask_layers.split(',')]
+        else:
+            self.gnn_edge_mask_layers = []
+        
+        if self.gnn_type == 'input' or self.gnn_type == 'output':
+            self.gnn = GNN(config)
+            self.edge_emb = nn.Linear(config.edge_dim, config.edge_size) 
+
+            if self.use_weighted_gnn:
+                self.gnn_weight = nn.Linear(config.hidden_size, config.hidden_size, bias=False)
 
         if self.config.with_pooler:
             self.pooler = BertPooler(config)
@@ -99,6 +115,7 @@ class VisualLinguisticBert(BaseModel):
                 text_mask,
                 object_vl_embeddings,
                 object_mask,
+                edge_features,
                 output_all_encoded_layers=True,
                 output_text_and_object_separately=False,
                 output_attention_probs=False):
@@ -110,6 +127,24 @@ class VisualLinguisticBert(BaseModel):
                                                                                           text_mask,
                                                                                           object_vl_embeddings,
                                                                                           object_mask)
+
+        # Incorporate GNN
+        gnn_edge_mask = None
+        if self.gnn_type == 'input' or self.gnn_type == 'output':
+            edge_features = edge_features.permute(0, 2, 3, 1)
+            edge_features = self.edge_emb(edge_features)
+
+            gnn_embedding_output, gnn_edge_output = self.gnn(embedding_output, edge_features)
+            gnn_edge_mask = gnn_edge_output.permute(0, 3, 1, 2)
+
+            if self.use_weighted_gnn:
+                gnn_embedding_output = self.gnn_weight(gnn_embedding_output)
+            
+            if self.gnn_type == 'input':
+                if self.use_weighted_gnn:
+                    embedding_output = embedding_output + gnn_embedding_output
+                else:
+                    embedding_output = gnn_embedding_output
 
         # We create a 3D attention mask from a 2D tensor mask.
         # Sizes are [batch_size, 1, 1, to_seq_length]
@@ -131,11 +166,15 @@ class VisualLinguisticBert(BaseModel):
         if output_attention_probs:
             encoded_layers, attention_probs = self.encoder(embedding_output,
                                                            extended_attention_mask,
+                                                           gnn_edge_mask=gnn_edge_mask,
+                                                           gnn_edge_mask_layers=self.gnn_edge_mask_layers,
                                                            output_all_encoded_layers=output_all_encoded_layers,
                                                            output_attention_probs=output_attention_probs)
         else:
             encoded_layers = self.encoder(embedding_output,
                                           extended_attention_mask,
+                                          gnn_edge_mask=gnn_edge_mask,
+                                          gnn_edge_mask_layers=self.gnn_edge_mask_layers,
                                           output_all_encoded_layers=output_all_encoded_layers,
                                           output_attention_probs=output_attention_probs)
         sequence_output = encoded_layers[-1]
@@ -157,9 +196,20 @@ class VisualLinguisticBert(BaseModel):
                 encoded_layer_object[object_mask] = encoded_layer[object_mask_new]
                 encoded_layers_text.append(encoded_layer_text)
                 encoded_layers_object.append(encoded_layer_object)
+            
             if not output_all_encoded_layers:
                 encoded_layers_text = encoded_layers_text[0]
                 encoded_layers_object = encoded_layers_object[0]
+
+                if self.gnn_type == 'output':
+                    max_object_len = object_vl_embeddings.shape[1]
+                    encoded_gnn_object = gnn_embedding_output.new_zeros(
+                        (gnn_embedding_output.shape[0], max_object_len, gnn_embedding_output.shape[2]))
+
+                    encoded_gnn_object[object_mask] = gnn_embedding_output[object_mask_new]
+
+                    encoded_layers_object = encoded_layers_object+encoded_gnn_object
+
             if output_attention_probs:
                 return encoded_layers_text, encoded_layers_object, pooled_output, attention_probs
             else:
@@ -179,27 +229,27 @@ class VisualLinguisticBert(BaseModel):
                   object_mask):
 
         text_linguistic_embedding = self.word_embeddings_wrapper(text_input_ids)
-        if self.visual_1x1_text is not None:
+        if self.visual_1x1_text is not None: # skip
             text_visual_embeddings = self.visual_1x1_text(text_visual_embeddings)
         if self.config.visual_ln:
-            text_visual_embeddings = self.visual_ln_text(text_visual_embeddings)
+            text_visual_embeddings = self.visual_ln_text(text_visual_embeddings) # does layer normalization
         else:
             text_visual_embeddings *= self.visual_scale_text
-        text_vl_embeddings = text_linguistic_embedding + text_visual_embeddings
+        text_vl_embeddings = text_linguistic_embedding + text_visual_embeddings # add the text embedding to the visual embedding of the whole image
 
         object_visual_embeddings = object_vl_embeddings[:, :, :self.config.visual_size]
-        if self.visual_1x1_object is not None:
+        if self.visual_1x1_object is not None: # skip
             object_visual_embeddings = self.visual_1x1_object(object_visual_embeddings)
         if self.config.visual_ln:
-            object_visual_embeddings = self.visual_ln_object(object_visual_embeddings)
+            object_visual_embeddings = self.visual_ln_object(object_visual_embeddings) # does layer normalization
         else:
             object_visual_embeddings *= self.visual_scale_object
-        object_linguistic_embeddings = object_vl_embeddings[:, :, self.config.visual_size:]
+        object_linguistic_embeddings = object_vl_embeddings[:, :, self.config.visual_size:] # linguistic embedding of [0...0] IMG
         object_vl_embeddings = object_linguistic_embeddings + object_visual_embeddings
 
-        bs = text_vl_embeddings.size(0)
-        vl_embed_size = text_vl_embeddings.size(-1)
-        max_length = (text_mask.sum(1) + object_mask.sum(1)).max() + 1
+        bs = text_vl_embeddings.size(0) # batch size
+        vl_embed_size = text_vl_embeddings.size(-1) # 768
+        max_length = (text_mask.sum(1) + object_mask.sum(1)).max() + 1 # length of input sequence. +1 for [SEP]
         grid_ind, grid_pos = torch.meshgrid(torch.arange(bs, dtype=torch.long, device=text_vl_embeddings.device),
                                             torch.arange(max_length, dtype=torch.long, device=text_vl_embeddings.device))
         text_end = text_mask.sum(1, keepdim=True)

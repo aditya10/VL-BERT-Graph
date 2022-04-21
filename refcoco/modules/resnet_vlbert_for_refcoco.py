@@ -75,6 +75,7 @@ class ResNetVLBERT(Module):
                       boxes,
                       im_info,
                       expression,
+                      edge_features,
                       label,
                       ):
         ###########################################
@@ -106,6 +107,7 @@ class ResNetVLBERT(Module):
         text_input_ids[_batch_inds, _sep_pos] = sep_id
         text_token_type_ids = text_input_ids.new_zeros(text_input_ids.shape)
         text_mask = text_input_ids > 0
+        # this adds the first feature of obj_reps to the text embedding. The first feature always represents the full image.
         text_visual_embeddings = obj_reps['obj_reps'][:, 0].unsqueeze(1).repeat((1, text_input_ids.shape[1], 1))
 
         object_linguistic_embeddings = self.object_linguistic_embeddings(
@@ -123,6 +125,7 @@ class ResNetVLBERT(Module):
                                                                  text_mask,
                                                                  object_vl_embeddings,
                                                                  box_mask,
+                                                                 edge_features,
                                                                  output_all_encoded_layers=False,
                                                                  output_text_and_object_separately=True)
 
@@ -155,7 +158,8 @@ class ResNetVLBERT(Module):
                           image,
                           boxes,
                           im_info,
-                          expression):
+                          expression,
+                          edge_features):
 
         ###########################################
 
@@ -202,6 +206,7 @@ class ResNetVLBERT(Module):
                                                                  text_mask,
                                                                  object_vl_embeddings,
                                                                  box_mask,
+                                                                 edge_features,
                                                                  output_all_encoded_layers=False,
                                                                  output_text_and_object_separately=True)
 

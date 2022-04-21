@@ -26,6 +26,8 @@ from refcoco.data.build import make_dataloader, build_dataset, build_transforms
 from refcoco.modules import *
 from refcoco.function.val import do_validation
 
+import wandb
+
 try:
     from apex import amp
     from apex.parallel import DistributedDataParallel as Apex_DDP
@@ -35,6 +37,29 @@ except ImportError:
 
 
 def train_net(args, config):
+
+    wandb_config = {
+        'batch_size': config.TRAIN.BATCH_IMAGES,
+        'gradient_accumulation_steps': config.TRAIN.GRAD_ACCUMULATE_STEPS,
+        'dataset': config.DATASET.DATASET,
+        'lr': config.TRAIN.LR,
+        'gnn_type': config.NETWORK.VLBERT.gnn_type,
+        'use_weighted_gnn': config.NETWORK.VLBERT.use_weighted_gnn,
+        'gnn_edge_mask_layers': config.NETWORK.VLBERT.gnn_edge_mask_layers,
+        'edge_dim': config.NETWORK.VLBERT.edge_dim,
+        'edge_size': config.NETWORK.VLBERT.edge_size,
+        'message_length': config.NETWORK.VLBERT.message_length,
+        'shrink_node_feature_dim': config.NETWORK.VLBERT.shrink_node_feature_dim,
+        'num_GNN_layers': config.NETWORK.VLBERT.num_GNN_layers,
+        'edge_type': config.DATASET.EDGE_TYPE,
+        'num_hidden_layers': config.NETWORK.VLBERT.num_hidden_layers,
+        'num_attention_heads': config.NETWORK.VLBERT.num_attention_heads
+    }
+
+    wandb_name = wandb_config['dataset']+'_'+str(wandb_config['gnn_type'])+'_'+str(wandb_config['edge_type'])+'_'+str(wandb_config['gnn_edge_mask_layers'])
+        
+    wandb.init(project='VL-BERT-Graph', entity="aditya10", name=wandb_name, config=wandb_config)
+
     # setup logger
     logger, final_output_path = create_logger(config.OUTPUT_PATH, args.cfg, config.DATASET.TRAIN_IMAGE_SET,
                                               split='train')
@@ -314,6 +339,8 @@ def train_net(args, config):
                                           min_loss_scale=128.0)
         if args.dist:
             model = Apex_DDP(model, delay_allreduce=True)
+
+    wandb.watch(model)
 
     train(model, optimizer, lr_scheduler, train_loader, train_sampler, train_metrics,
           config.TRAIN.BEGIN_EPOCH, config.TRAIN.END_EPOCH, logger,

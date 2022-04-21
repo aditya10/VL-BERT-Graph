@@ -1,5 +1,6 @@
 import logging
 import shutil
+import wandb
 
 
 class ValidationMonitor(object):
@@ -41,7 +42,7 @@ class ValidationMonitor(object):
                                   global_step=epoch_num + 1)
         logging.info(s)
         print(s)
-
+        wandb.log({'Best-Val': self.best_val, 'Best-Epoch': self.best_epoch})
         logging.info('Best Val {}: {}, Epoch: {}'.format(self.host_metric_name, self.best_val, self.best_epoch))
         print('Best Val {}: {}, Epoch: {}'.format(self.host_metric_name, self.best_val, self.best_epoch))
 

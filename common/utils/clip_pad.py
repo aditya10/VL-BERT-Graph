@@ -37,6 +37,22 @@ def clip_pad_boxes(tensor, pad_length, pad=0):
 
     return tensor_ret
 
+def clip_pad_edge_features(tensor, pad_shape, pad=0):
+    """
+        Clip edge of the pad area.
+        :param tensor: [d, k, k]
+        :param pad_shape: K
+        :return: [d, K, K]
+    """
+    if not isinstance(tensor, torch.Tensor):
+        tensor = torch.as_tensor(tensor)
+    d = tensor.shape[0]
+    k = tensor.shape[1]
+    K = pad_shape
+    tensor_ret = torch.zeros((d, K, K), dtype=tensor.dtype) + pad
+    tensor_ret[:, :min(k, K), :min(k, K)] = tensor[:, :min(k, K), :min(k, K)]
+
+    return tensor_ret
 
 def clip_pad_1d(tensor, pad_length, pad=0):
     if not isinstance(tensor, torch.Tensor):

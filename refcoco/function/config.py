@@ -50,6 +50,7 @@ _C.DATASET.VAL_BOXES = "gt"   # "gt" or "proposal"
 _C.DATASET.TEST_BOXES = "gt"   # "gt" or "proposal"
 _C.DATASET.PROPOSAL_SOURCE = 'official'  # "official" or "vg"
 _C.DATASET.USE_IMDB = True
+_C.DATASET.EDGE_TYPE = ''
 
 # ------------------------------------------------------------------------------------- #
 # Common network options
@@ -97,6 +98,14 @@ _C.NETWORK.VLBERT.word_embedding_frozen = False
 _C.NETWORK.VLBERT.obj_pos_id_relative = True
 _C.NETWORK.VLBERT.hidden_size = 512
 _C.NETWORK.VLBERT.visual_size = 512
+_C.NETWORK.VLBERT.gnn_type = 'input'
+_C.NETWORK.VLBERT.use_weighted_gnn = True
+_C.NETWORK.VLBERT.gnn_edge_mask_layers = '0,1'
+_C.NETWORK.VLBERT.edge_dim = 50
+_C.NETWORK.VLBERT.edge_size = 64 
+_C.NETWORK.VLBERT.message_length = 128
+_C.NETWORK.VLBERT.shrink_node_feature_dim = 128
+_C.NETWORK.VLBERT.num_GNN_layers = 4
 _C.NETWORK.VLBERT.num_hidden_layers = 4
 _C.NETWORK.VLBERT.num_attention_heads = 8
 _C.NETWORK.VLBERT.intermediate_size = 2048

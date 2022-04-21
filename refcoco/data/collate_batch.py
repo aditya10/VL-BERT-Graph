@@ -19,6 +19,7 @@ class BatchCollator(object):
         else:
             image_none = True
         max_boxes = max([data[self.data_names.index('boxes')].shape[0] for data in batch])
+        max_edge_feature = max([data[self.data_names.index('edge_features')].shape[1] for data in batch])
         max_expression_length = max([len(data[self.data_names.index('expression')]) for data in batch])
 
         for i, ibatch in enumerate(batch):
@@ -32,6 +33,9 @@ class BatchCollator(object):
 
             boxes = ibatch[self.data_names.index('boxes')]
             out['boxes'] = clip_pad_boxes(boxes, max_boxes, pad=-2)
+
+            edge_features = ibatch[self.data_names.index('edge_features')]
+            out['edge_features'] = clip_pad_edge_features(edge_features, max_edge_feature, pad=0)
 
             expression = ibatch[self.data_names.index('expression')]
             out['expression'] = clip_pad_1d(expression, max_expression_length, pad=0)

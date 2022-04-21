@@ -2,6 +2,7 @@ import os
 import time
 from collections import namedtuple
 import torch
+import wandb
 
 try:
     from apex import amp
@@ -166,6 +167,7 @@ def train(net,
                         writer.add_scalar(tag='LR/Group_{}'.format(group_i),
                                           scalar_value=param_group['lr'],
                                           global_step=global_steps)
+                    wandb.log({'Train-Loss': float(loss.item())}, step=global_steps)
                     writer.add_scalar(tag='Train-Loss',
                                       scalar_value=float(loss.item()),
                                       global_step=global_steps)
@@ -174,6 +176,7 @@ def train(net,
                         writer.add_scalar(tag='Train-' + n,
                                           scalar_value=v,
                                           global_step=global_steps)
+                        wandb.log({'Train-' + n: v}, step=global_steps)
 
             metric_time = time.time() - metric_time
 

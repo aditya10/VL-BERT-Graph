@@ -6,6 +6,11 @@ import base64
 import numpy as np
 import time
 import logging
+import math
+import itertools
+import pickle
+import seaborn as sns
+import matplotlib.pyplot as plt
 
 import torch
 from torch.utils.data import Dataset
@@ -18,6 +23,7 @@ from common.utils.bbox import bbox_iou_py_vectorized
 from pycocotools.coco import COCO
 from .refer.refer import REFER
 
+from sentence_transformers import SentenceTransformer, util
 
 class RefCOCO(Dataset):
     def __init__(self, image_set, root_path, data_path, boxes='gt', proposal_source='official',
@@ -25,7 +31,8 @@ class RefCOCO(Dataset):
                  zip_mode=False, cache_mode=False, cache_db=False, ignore_db_cache=True,
                  tokenizer=None, pretrained_model_name=None,
                  add_image_as_a_box=False, mask_size=(14, 14),
-                 aspect_grouping=False, **kwargs):
+                 aspect_grouping=False, with_precomputed_visual_feat=False, 
+                 edge_type='', **kwargs):
         """
         RefCOCO+ Dataset
 
@@ -67,6 +74,7 @@ class RefCOCO(Dataset):
         proposal_dets = 'refcoco+/proposal/res101_coco_minus_refer_notime_dets.json'
         proposal_masks = 'refcoco+/proposal/res101_coco_minus_refer_notime_masks.json'
         self.vg_proposal = ("vgbua_res101_precomputed", "trainval2014_resnet101_faster_rcnn_genome")
+        self.box_features_path = '/scratch/VL-BERT-Graph/data/coco/obj_reps_raw_train2014'
         self.proposal_source = proposal_source
         self.boxes = boxes
         self.test_mode = test_mode
@@ -77,6 +85,7 @@ class RefCOCO(Dataset):
         self.image_sets = [iset.strip() for iset in image_set.split('+')]
         self.coco = COCO(annotation_file=os.path.join(data_path, coco_annot_files['train2014']))
         self.refer = REFER(data_path, dataset='refcoco+', splitBy='unc')
+        self.mini_set = True
         self.refer_ids = []
         for iset in self.image_sets:
             self.refer_ids.extend(self.refer.getRefIds(split=iset))
@@ -99,6 +108,11 @@ class RefCOCO(Dataset):
         self.cache_dir = os.path.join(root_path, 'cache')
         self.add_image_as_a_box = add_image_as_a_box
         self.mask_size = mask_size
+
+        self.with_precomputed_visual_feat = with_precomputed_visual_feat
+
+        self.edge_features = edge_type.split(',')
+
         if not os.path.exists(self.cache_dir):
             makedirsExist(self.cache_dir)
         self.tokenizer = tokenizer if tokenizer is not None \
@@ -112,13 +126,32 @@ class RefCOCO(Dataset):
         self.database = self.load_annotations()
         if self.aspect_grouping:
             self.group_ids = self.group_aspect(self.database)
+        
+        if ("word_sim" in self.edge_features) or ("clip_sim" in self.edge_features):
+            print("Loading CLIP model...")
+            self.wvcache = {}
+            self.sbert_model = SentenceTransformer('clip-ViT-B-32', device='cpu')
+            print("CLIP loaded")
+    
+        if "glove" in self.edge_features:
+            print("Loading GloVe embeddings...")
+            self.wvcache = {}
+            self.glove_dict = {}
+            with open('/scratch/VL-BERT-Graph/data/coco/glove/glove.6B.50d.txt','r') as f:
+                for line in f:
+                    values = line.split()
+                    word = values[0]
+                    vector = np.asarray(values[1:],'float32')
+                    self.glove_dict[word]=vector
+            print("GloVe loaded")
+
 
     @property
     def data_names(self):
         if self.test_mode:
-            return ['image', 'boxes', 'im_info', 'expression']
+            return ['image', 'boxes', 'im_info', 'expression', 'edge_features']
         else:
-            return ['image', 'boxes', 'im_info', 'expression', 'label']
+            return ['image', 'boxes', 'im_info', 'expression', 'edge_features', 'label']
 
     def __getitem__(self, index):
         idb = self.database[index]
@@ -134,10 +167,18 @@ class RefCOCO(Dataset):
             ann_ids = self.coco.getAnnIds(imgIds=img_id)
             anns = self.coco.loadAnns(ann_ids)
             boxes = []
+            cats = []
             for ann in anns:
                 x_, y_, w_, h_ = ann['bbox']
                 boxes.append([x_, y_, x_ + w_, y_ + h_])
+                cat = self.coco.loadCats(ann["category_id"])
+                cats.append(cat[0])
             boxes = torch.as_tensor(boxes)
+
+            if self.with_precomputed_visual_feat:
+                path = idb['box_fn']
+                boxes_features = self.load_box_features(path)
+
         elif self.boxes == 'proposal':
             if self.proposal_source == 'official':
                 boxes = torch.as_tensor(self.proposals[img_id])
@@ -209,10 +250,44 @@ class RefCOCO(Dataset):
             exp_retokens = self.flip_tokens(exp_retokens, verbose=True)
         exp_ids = self.tokenizer.convert_tokens_to_ids(exp_retokens)
 
+        # edge features
+        edge_dim = 50 if 'glove' in self.edge_features else 1
+        num_box = boxes.size(0)
+        num_exp = len(exp_ids)
+        edge_feat = torch.zeros(edge_dim, num_exp+num_box+3, num_exp+num_box+3)
+        
+        cats = [c['name'] for c in cats]
+        token_seq = ['CLS']+exp_retokens+['SEP', '']+cats+['END']
+
+        if "glove" in self.edge_features:
+            for i, w1 in enumerate(token_seq):
+                for j, w2 in enumerate(token_seq):
+                    w_diff = self.get_glove_diff(w1, w2)
+                    edge_feat[:, i, j] = w_diff
+            #self.plot_edges(torch.norm(edge_feat, dim=0), token_seq)
+        
+        if "word_sim" in self.edge_features:
+            for i, w1 in enumerate(token_seq):
+                for j, w2 in enumerate(token_seq):
+                    w_dist = self.get_clip_sim(w1, w2)
+                    edge_feat[0, i, j] = w_dist
+            #self.plot_edges(edge_feat[0, :, :], token_seq)
+        
+        # This is too slow to run, therefore unused
+        if "clip_sim" in self.edge_features: 
+            w, h, _, _ = im_info.tolist()
+            img = self._load_image(idb['image_fn'])
+            cosine_sim = self.get_clip_multi_sim(img, int(w), int(h), boxes, exp_retokens)
+            edge_feat[0, :, :] = cosine_sim
+
+        # concat box feature to box
+        if self.with_precomputed_visual_feat:
+            boxes = torch.cat((boxes, boxes_features), dim=-1)
+
         if self.test_mode:
-            return image, boxes, im_info, exp_ids
+            return image, boxes, im_info, exp_ids, edge_feat
         else:
-            return image, boxes, im_info, exp_ids, label
+            return image, boxes, im_info, exp_ids, edge_feat, label
 
     @staticmethod
     def flip_tokens(tokens, verbose=True):
@@ -241,6 +316,8 @@ class RefCOCO(Dataset):
             db_cache_name = db_cache_name + '_zipmode'
         if self.test_mode:
             db_cache_name = db_cache_name + '_testmode'
+        if self.mini_set:
+            db_cache_name = db_cache_name + '_mini'
         db_cache_root = os.path.join(self.root_path, 'cache')
         db_cache_path = os.path.join(db_cache_root, '{}.pkl'.format(db_cache_name))
 
@@ -260,6 +337,11 @@ class RefCOCO(Dataset):
         # ignore or not find cached database, reload it from annotation file
         print('loading database of split {}...'.format('+'.join(self.image_sets)))
         tic = time.time()
+
+        if self.mini_set:
+            print("Loading only 10000 refs")
+            self.refs = self.refs[:10000]
+            self.refer_ids = self.refer_ids[:10000]
 
         for ref_id, ref in zip(self.refer_ids, self.refs):
             iset = 'train2014'
@@ -283,9 +365,12 @@ class RefCOCO(Dataset):
                     'sent': sent['sent'],
                     'tokens': sent['tokens'],
                     'category_id': ref['category_id'],
-                    'gt_box': [gt_x, gt_y, gt_x + gt_w, gt_y + gt_h] if not self.test_mode else None
+                    'gt_box': [gt_x, gt_y, gt_x + gt_w, gt_y + gt_h] if not self.test_mode else None,
+                    'box_fn': os.path.join(self.box_features_path, '{}.pkl'.format(ref['image_id']))
                 }
                 database.append(idb)
+
+        print("Refs: ", len(self.refs), " Database: ", len(database))
 
         print('Done (t={:.2f}s)'.format(time.time() - tic))
 
@@ -338,3 +423,142 @@ class RefCOCO(Dataset):
             with open(path, 'r') as f:
                 return json.load(f)
 
+    def load_box_features(self, box_fn):
+        with open(box_fn, 'rb') as f:
+            unserialized_data = pickle.load(f)
+            box_features = torch.as_tensor(unserialized_data)
+
+        box_features = box_features.squeeze(0)
+        return box_features
+
+    def plot_edges(self, edge_feat, token_seq): 
+        # Use seaborn to plot edge_feat as a heatmap
+        edge_feat = edge_feat.detach().numpy()
+        ax = sns.heatmap(edge_feat, cmap='coolwarm_r', xticklabels=token_seq, yticklabels=token_seq)
+        ax.figure.tight_layout()
+        plt.savefig('_'.join(token_seq)+'.png')
+        plt.clf()
+
+    #############################
+    ### Edge Features for GNN
+    #############################
+
+    def bbox_distance(self, bbox1, bbox2):
+        x11, y11, x12, y12 = bbox1
+        x21, y21, x22, y22 = bbox2
+        x1,y1 = (x11 + x12)/2, (y11 + y12)/2
+        x2,y2 = (x21 + x22)/2, (y21 + y22)/2
+        dist = math.hypot(x2 - x1, y2 - y1)
+        return dist
+
+    def bbox_iou(self, bbox1, bbox2):
+        x11, y11, x12, y12 = bbox1
+        x21, y21, x22, y22 = bbox2
+
+        # Find intersection box:
+        x_left = max(x11, x21)
+        y_top = max(y11, y21)
+        x_right = min(x12, x22)
+        y_bottom = min(y12, y22)
+
+        if x_right < x_left or y_bottom < y_top:
+            return 0.0
+
+        # The intersection of two axis-aligned bounding boxes is always an
+        # axis-aligned bounding box
+        intersection_area = (x_right - x_left) * (y_bottom - y_top)
+
+        # compute the area of both AABBs
+        bb1_area = (x12 - x11) * (y12 - y11)
+        bb2_area = (x22 - x21) * (y22 - y21)
+
+        # compute the intersection over union by taking the intersection
+        # area and dividing it by the sum of prediction + ground-truth
+        # areas - the interesection area
+        iou = intersection_area / float(bb1_area + bb2_area - intersection_area)
+        assert iou >= 0.0
+        assert iou <= 1.0
+        return iou
+
+    def bbox_union_box(self, bbox1, bbox2):
+        x11, y11, x12, y12 = bbox1
+        x21, y21, x22, y22 = bbox2
+
+        # Find union box:
+        x_left = min(x11, x21)
+        y_top = min(y11, y21)
+        x_right = max(x12, x22)
+        y_bottom = max(y12, y22)
+
+        return [x_left, y_top, x_right, y_bottom]
+    
+    def get_glove_diff(self, w1, w2):
+        w1 = w1.split(' ')[0]
+        w2 = w2.split(' ')[0]
+        w1 = '##' if w1.startswith('##') else w1
+        w2 = '##' if w2.startswith('##') else w2
+
+        if w1 in self.wvcache:
+            w1_vec = self.wvcache[w1]
+        elif w1 in self.glove_dict:
+            w1_vec = self.glove_dict[w1]
+            w1_vec = torch.tensor(w1_vec)
+            self.wvcache[w1] = w1_vec
+        else:
+            w1_vec = torch.zeros(50)
+            self.wvcache[w1] = w1_vec
+        
+        if w2 in self.wvcache:
+            w2_vec = self.wvcache[w2]
+        elif w2 in self.glove_dict:
+            w2_vec = self.glove_dict[w2]
+            w2_vec = torch.tensor(w2_vec)
+            self.wvcache[w2] = w2_vec
+        else:
+            w2_vec = torch.zeros(50)
+            self.wvcache[w2] = w2_vec
+        
+        return w2_vec-w1_vec
+ 
+    def get_clip_sim(self, w1, w2):
+        if w1 in self.wvcache:
+            w1_emb = self.wvcache[w1]
+        else:
+            w1_emb = self.sbert_model.encode([w1], show_progress_bar=False)
+            self.wvcache[w1] = w1_emb
+        
+        if w2 in self.wvcache:
+            w2_emb = self.wvcache[w2]
+        else:
+            w2_emb = self.sbert_model.encode([w2], show_progress_bar=False)
+            self.wvcache[w2] = w2_emb
+
+        #Compute cosine similarities 
+        cos_scores = util.cos_sim(w1_emb, w2_emb)
+        return cos_scores[0][0]
+    
+    def get_clip_multi_sim(self, image, w, h, boxes, tokens): 
+        
+        image_boxes = []
+        for box in boxes:
+            # Resize the image
+            img = image.resize((w,h))
+            # Crop the image with some padding
+            x_min, y_min, x_max, y_max = box.tolist()
+            x_min = max(x_min-10, 0)
+            y_min = max(y_min-10, 0)
+            x_max = min(x_max+10, w)
+            y_max = min(y_max+10, h)
+            im_1 = img.crop((x_min, y_min, x_max, y_max))
+            image_boxes.append(im_1)
+        # Create token sequence
+        token_seq = ['CLS']+tokens+['SEP']+image_boxes+['END']
+        # Encode token sequence
+        token_emb = self.sbert_model.encode(token_seq, show_progress_bar=False)
+        # Compute cosine similarities
+        cos_scores = util.cos_sim(token_emb, token_emb)
+        return cos_scores
+
+    
+
+    
